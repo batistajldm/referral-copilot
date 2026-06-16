@@ -12,11 +12,20 @@ export type ReviewSummary = {
   up: number;
   down: number;
   total: number;
+  /** Votes carrying a written comment. */
+  commented: number;
+  /** Coordinator decisions surfaced from the shortlist. */
+  decisions: number;
   my_rating: ReviewRating | null;
 };
 
 export type ReviewDetail = {
-  rating: number;
+  /** 'vote' = thumbs + comment · 'decision' = a shortlist status/note. */
+  source: 'vote' | 'decision';
+  rating: number | null;
+  status: string | null;
+  /** Service the coordinator searched (decisions only). */
+  need: string | null;
   comment: string;
   created_at: string;
   is_mine: boolean;

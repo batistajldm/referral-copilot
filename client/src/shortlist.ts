@@ -12,6 +12,8 @@ export type ShortlistItem = {
   facility_city: string | null;
   facility_state: string | null;
   evidence_score: number | null;
+  /** The service the coordinator searched when they saved this facility. */
+  need: string;
   note: string;
   status: ShortlistStatus;
   created_at: string;
@@ -24,6 +26,7 @@ export type SaveInput = {
   facility_city?: string;
   facility_state?: string;
   evidence_score?: number | null;
+  need?: string;
 };
 
 function upsert(items: ShortlistItem[], row: ShortlistItem): ShortlistItem[] {

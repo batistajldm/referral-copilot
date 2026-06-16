@@ -780,6 +780,13 @@ function ShortlistPanel({ shortlist }: { shortlist: ShortlistApi }) {
   );
 }
 
+/** Short, locale-aware date (e.g. "16 Jun 2026"); '' for unparseable input. */
+function formatDate(value: unknown): string {
+  if (!value) return '';
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 function ShortlistRow({ item, shortlist }: { item: ShortlistItem; shortlist: ShortlistApi }) {
   const [note, setNoteText] = useState(item.note);
   const dirty = note !== item.note;
@@ -809,6 +816,18 @@ function ShortlistRow({ item, shortlist }: { item: ShortlistItem; shortlist: Sho
                 </span>
               );
             })()}
+          </p>
+          {/* Context for the decision: which service was searched, and when. */}
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+            {item.need?.trim() && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
+                <Stethoscope className="h-3 w-3" /> {item.need.trim()}
+              </span>
+            )}
+            {formatDate(item.created_at) && <span>Saved {formatDate(item.created_at)}</span>}
+            {formatDate(item.updated_at) && item.updated_at !== item.created_at && (
+              <span>· updated {formatDate(item.updated_at)}</span>
+            )}
           </p>
         </div>
         <button
@@ -1326,6 +1345,7 @@ function FacilityCard({
         facility_city: clean(row.city) ?? '',
         facility_state: clean(row.state) ?? '',
         evidence_score: typeof row.evidence_score === 'number' ? row.evidence_score : null,
+        need: needle.trim(),
       });
     }
   }
@@ -1519,8 +1539,10 @@ function CommunityFeedback({ row, reviews }: { row: FacilityRow; reviews: Review
   const summary = reviews.summaries[row.unique_id];
   const up = summary?.up ?? 0;
   const down = summary?.down ?? 0;
-  const total = summary?.total ?? 0;
   const mine = summary?.my_rating ?? null;
+  // "Notes" = votes that carry a comment + shortlist decisions (status/note).
+  const notesCount = (summary?.commented ?? 0) + (summary?.decisions ?? 0);
+  const hasAnything = up > 0 || down > 0 || notesCount > 0;
 
   const [comment, setComment] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
@@ -1581,9 +1603,9 @@ function CommunityFeedback({ row, reviews }: { row: FacilityRow; reviews: Review
         >
           <MessageSquare className="h-3.5 w-3.5" /> {noteOpen ? 'Hide note' : 'Add a note'}
         </button>
-        {total > 0 && (
+        {notesCount > 0 && (
           <button type="button" onClick={() => void toggleComments()} className="text-xs text-muted-foreground hover:text-foreground">
-            {showComments ? 'Hide notes' : `Read notes (${total})`}
+            {showComments ? 'Hide notes' : `Read notes (${notesCount})`}
           </button>
         )}
       </div>
@@ -1602,28 +1624,51 @@ function CommunityFeedback({ row, reviews }: { row: FacilityRow; reviews: Review
         </div>
       )}
 
-      {total === 0 && !noteOpen && (
+      {!hasAnything && !noteOpen && (
         <p className="text-xs text-muted-foreground">No feedback yet — be the first to help the next coordinator.</p>
       )}
 
       {showComments && details && (
-        <ul className="space-y-1.5 pt-0.5">
+        <ul className="space-y-2 pt-0.5">
           {details.length === 0 ? (
             <li className="text-xs text-muted-foreground">Votes recorded, but no written notes yet.</li>
           ) : (
-            details.map((d, i) => (
-              <li key={i} className="flex items-start gap-1.5 text-xs text-muted-foreground">
-                {d.rating === 1 ? (
-                  <ThumbsUp className="h-3 w-3 mt-0.5 shrink-0 text-emerald-600" />
-                ) : (
-                  <ThumbsDown className="h-3 w-3 mt-0.5 shrink-0 text-amber-600" />
-                )}
-                <span>
-                  <span className="font-medium text-foreground">{d.is_mine ? 'You' : 'A coordinator'}:</span>{' '}
-                  “{d.comment}”
-                </span>
-              </li>
-            ))
+            details.map((d, i) => {
+              const who = d.is_mine ? 'You' : 'A coordinator';
+              const when = formatDate(d.created_at);
+              if (d.source === 'decision') {
+                // A shortlist review: status badge + the service it was for + note.
+                const sMeta = d.status ? statusMeta(d.status as ShortlistStatus) : null;
+                return (
+                  <li key={i} className="text-xs text-muted-foreground">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <ListFilter className="h-3 w-3 shrink-0 text-primary" />
+                      <span className="font-medium text-foreground">{who}</span>
+                      {sMeta && (
+                        <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${sMeta.className}`}>{sMeta.label}</span>
+                      )}
+                      {d.need?.trim() && <span>for “{d.need.trim()}”</span>}
+                      {when && <span className="text-[11px]">· {when}</span>}
+                    </span>
+                    {d.comment.trim() && <span className="mt-0.5 block pl-[18px]">“{d.comment.trim()}”</span>}
+                  </li>
+                );
+              }
+              // A thumbs vote with a comment.
+              return (
+                <li key={i} className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  {d.rating === 1 ? (
+                    <ThumbsUp className="h-3 w-3 mt-0.5 shrink-0 text-emerald-600" />
+                  ) : (
+                    <ThumbsDown className="h-3 w-3 mt-0.5 shrink-0 text-amber-600" />
+                  )}
+                  <span>
+                    <span className="font-medium text-foreground">{who}</span>
+                    {when && <span className="text-[11px]"> · {when}</span>}: “{d.comment}”
+                  </span>
+                </li>
+              );
+            })
           )}
         </ul>
       )}

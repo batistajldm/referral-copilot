@@ -29,14 +29,19 @@ export async function initShortlistSchema(appkit: AppKit): Promise<void> {
       facility_city   TEXT,
       facility_state  TEXT,
       evidence_score  INTEGER,
+      need            TEXT        NOT NULL DEFAULT '',
       note            TEXT        NOT NULL DEFAULT '',
       status          TEXT        NOT NULL DEFAULT 'considering',
       created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (user_id, facility_id)
     );
-    -- Idempotent migration for tables created before the status column existed.
+    -- Idempotent migrations for tables created before these columns existed.
     ALTER TABLE referral.shortlist ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'considering';
+    -- need records WHICH service the coordinator was searching when they saved
+    -- the facility, so the shortlist (and the shared community view) shows the
+    -- decision in context, not just saved-this-place.
+    ALTER TABLE referral.shortlist ADD COLUMN IF NOT EXISTS need TEXT NOT NULL DEFAULT '';
   `);
 }
 
@@ -48,6 +53,7 @@ const saveSchema = z.object({
   facility_city: z.string().optional().default(''),
   facility_state: z.string().optional().default(''),
   evidence_score: z.number().int().optional().nullable(),
+  need: z.string().max(200).optional().default(''),
   note: z.string().max(4000).optional().default(''),
 });
 
@@ -73,7 +79,7 @@ export function userIdFrom(req: { header(name: string): string | undefined }): s
 export async function listShortlist(appkit: AppKit, userId: string) {
   const { rows } = await appkit.lakebase.query(
     `SELECT facility_id, facility_name, facility_city, facility_state,
-            evidence_score, note, status, created_at, updated_at
+            evidence_score, need, note, status, created_at, updated_at
        FROM referral.shortlist
       WHERE user_id = $1
       ORDER BY created_at DESC`,
@@ -90,18 +96,19 @@ export async function saveToShortlist(appkit: AppKit, userId: string, body: unkn
   // unless a new note is provided.
   const { rows } = await appkit.lakebase.query(
     `INSERT INTO referral.shortlist
-       (user_id, facility_id, facility_name, facility_city, facility_state, evidence_score, note)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (user_id, facility_id, facility_name, facility_city, facility_state, evidence_score, need, note)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (user_id, facility_id) DO UPDATE SET
        facility_name  = EXCLUDED.facility_name,
        facility_city  = EXCLUDED.facility_city,
        facility_state = EXCLUDED.facility_state,
        evidence_score = EXCLUDED.evidence_score,
+       need           = CASE WHEN EXCLUDED.need <> '' THEN EXCLUDED.need ELSE referral.shortlist.need END,
        note           = CASE WHEN EXCLUDED.note <> '' THEN EXCLUDED.note ELSE referral.shortlist.note END,
        updated_at     = NOW()
      RETURNING facility_id, facility_name, facility_city, facility_state,
-               evidence_score, note, status, created_at, updated_at`,
-    [userId, d.facility_id, d.facility_name, d.facility_city, d.facility_state, d.evidence_score ?? null, d.note],
+               evidence_score, need, note, status, created_at, updated_at`,
+    [userId, d.facility_id, d.facility_name, d.facility_city, d.facility_state, d.evidence_score ?? null, d.need, d.note],
   );
   return { row: rows[0] };
 }

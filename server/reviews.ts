@@ -62,6 +62,11 @@ export type ReviewSummary = {
   up: number;
   down: number;
   total: number;
+  /** Votes that carry a written comment (drives the "read notes" count). */
+  commented: number;
+  /** Coordinator decisions surfaced from the shortlist (status set and/or a
+   *  note) — the second kind of shared feedback. */
+  decisions: number;
   /** The signed-in user's own vote for this facility, if any. */
   my_rating: 1 | -1 | null;
 };
@@ -78,17 +83,29 @@ export async function summarizeReviews(
   const ids = facilityIds.filter((s) => typeof s === 'string' && s.length > 0);
   if (ids.length === 0) return [];
 
-  // Aggregate counts across ALL users (the shared signal)…
+  // Aggregate vote counts across ALL users (the shared signal)…
   const { rows: agg } = await appkit.lakebase.query(
     `SELECT facility_id,
-            COUNT(*) FILTER (WHERE rating = 1)  AS up,
-            COUNT(*) FILTER (WHERE rating = -1) AS down,
-            COUNT(*)                            AS total
+            COUNT(*) FILTER (WHERE rating = 1)   AS up,
+            COUNT(*) FILTER (WHERE rating = -1)  AS down,
+            COUNT(*)                             AS total,
+            COUNT(*) FILTER (WHERE comment <> '') AS commented
        FROM referral.facility_review
       WHERE facility_id = ANY($1)
       GROUP BY facility_id`,
     [ids],
   );
+
+  // …shortlist decisions across ALL users (status set, or a note left)…
+  const { rows: dec } = await appkit.lakebase.query(
+    `SELECT facility_id, COUNT(*) AS decisions
+       FROM referral.shortlist
+      WHERE facility_id = ANY($1) AND (status <> 'considering' OR note <> '')
+      GROUP BY facility_id`,
+    [ids],
+  );
+  const decMap = new Map<string, number>();
+  for (const r of dec) decMap.set(String(r.facility_id), toInt(r.decisions));
 
   // …plus the caller's own vote, so the UI can show its toggle state.
   const { rows: mine } = await appkit.lakebase.query(
@@ -100,13 +117,22 @@ export async function summarizeReviews(
   const myMap = new Map<string, 1 | -1>();
   for (const r of mine) myMap.set(String(r.facility_id), toInt(r.rating) as 1 | -1);
 
-  return agg.map((r) => {
-    const fid = String(r.facility_id);
+  // Build a summary for every facility that has ANY shared activity — votes or
+  // decisions — so a facility known only through a shortlist decision still
+  // surfaces in the community section.
+  const aggMap = new Map<string, Record<string, unknown>>();
+  for (const r of agg) aggMap.set(String(r.facility_id), r);
+  const activeIds = new Set<string>([...aggMap.keys(), ...decMap.keys()]);
+
+  return [...activeIds].map((fid) => {
+    const r = aggMap.get(fid);
     return {
       facility_id: fid,
-      up: toInt(r.up),
-      down: toInt(r.down),
-      total: toInt(r.total),
+      up: r ? toInt(r.up) : 0,
+      down: r ? toInt(r.down) : 0,
+      total: r ? toInt(r.total) : 0,
+      commented: r ? toInt(r.commented) : 0,
+      decisions: decMap.get(fid) ?? 0,
       my_rating: myMap.get(fid) ?? null,
     };
   });
@@ -117,16 +143,40 @@ export async function summarizeReviews(
 // only the caller's own review is flagged `is_mine` so they can edit/remove it.
 
 export async function listReviewsFor(appkit: AppKit, userId: string, facilityId: string) {
+  // Two kinds of shared feedback, unified into one chronological list:
+  //  • 'vote'     — a thumbs-up/down with a written comment.
+  //  • 'decision' — a coordinator's shortlist decision (status and/or note),
+  //                 tagged with the service they searched for.
+  // Identities are never exposed; only the caller's own entries are flagged.
   const { rows } = await appkit.lakebase.query(
-    `SELECT rating, comment, created_at, (user_id = $1) AS is_mine
+    `SELECT 'vote'      AS source,
+            rating,
+            NULL::text   AS status,
+            NULL::text   AS need,
+            comment,
+            created_at,
+            (user_id = $1) AS is_mine
        FROM referral.facility_review
       WHERE facility_id = $2 AND comment <> ''
-      ORDER BY (user_id = $1) DESC, created_at DESC
-      LIMIT 25`,
+     UNION ALL
+     SELECT 'decision'   AS source,
+            NULL::smallint AS rating,
+            status,
+            need,
+            note         AS comment,
+            created_at,
+            (user_id = $1) AS is_mine
+       FROM referral.shortlist
+      WHERE facility_id = $2 AND (status <> 'considering' OR note <> '')
+      ORDER BY is_mine DESC, created_at DESC
+      LIMIT 50`,
     [userId, facilityId],
   );
   return rows.map((r) => ({
-    rating: toInt(r.rating),
+    source: r.source === 'decision' ? ('decision' as const) : ('vote' as const),
+    rating: r.rating == null ? null : toInt(r.rating),
+    status: r.status == null ? null : String(r.status),
+    need: r.need == null ? null : String(r.need),
     comment: String(r.comment ?? ''),
     created_at: r.created_at,
     is_mine: Boolean(r.is_mine),
@@ -154,7 +204,9 @@ export async function submitReview(appkit: AppKit, userId: string, body: unknown
   );
   // Return the fresh aggregate so the client can update in place.
   const [summary] = await summarizeReviews(appkit, userId, [d.facility_id]);
-  return { row: summary ?? { facility_id: d.facility_id, up: 0, down: 0, total: 0, my_rating: d.rating } };
+  return {
+    row: summary ?? { facility_id: d.facility_id, up: 0, down: 0, total: 0, commented: 0, decisions: 0, my_rating: d.rating },
+  };
 }
 
 export async function deleteReview(appkit: AppKit, userId: string, facilityId: string) {
@@ -163,5 +215,5 @@ export async function deleteReview(appkit: AppKit, userId: string, facilityId: s
     [userId, facilityId],
   );
   const [summary] = await summarizeReviews(appkit, userId, [facilityId]);
-  return summary ?? { facility_id: facilityId, up: 0, down: 0, total: 0, my_rating: null };
+  return summary ?? { facility_id: facilityId, up: 0, down: 0, total: 0, commented: 0, decisions: 0, my_rating: null };
 }

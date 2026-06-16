@@ -75,15 +75,23 @@ export function FacilityMap({
   heightClass = 'h-64',
   colorMeaning = 'evidence tier',
   legend,
+  onSelect,
 }: {
   points: MapPoint[];
   city?: string;
   heightClass?: string;
   colorMeaning?: string;
   legend?: MapLegendItem[];
+  /** Called with the facility's unique_id when its pin is clicked (e.g. to
+   *  scroll the matching card into view). */
+  onSelect?: (uniqueId: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  // Hold onSelect in a ref so the map effect (keyed on point data) doesn't need
+  // to re-run when the callback identity changes.
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
 
   // Normalise coordinates up front (DOUBLE columns may arrive as strings) and
   // drop rows without usable coordinates or stuck at the (0,0) null-island.
@@ -119,7 +127,7 @@ export function FacilityMap({
       const relLine = relLabel
         ? `<br/><span style="color:${fill};font-weight:600">●</span> <span style="color:#374151">${escapeHtml(relLabel)}</span>`
         : '';
-      L.circleMarker([p.lat, p.lon], {
+      const marker = L.circleMarker([p.lat, p.lon], {
         radius: 7,
         color: '#ffffff',
         weight: 1.5,
@@ -132,6 +140,8 @@ export function FacilityMap({
             dist ? `<br/><span style="color:#6b7280">${escapeHtml(dist)}</span>` : ''
           }`,
         );
+      // Clicking a pin scrolls the matching card into view in the results list.
+      marker.on('click', () => onSelectRef.current?.(p.unique_id));
       latlngs.push([p.lat, p.lon]);
     }
 

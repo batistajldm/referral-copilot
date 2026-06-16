@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Button,
   Card,
@@ -454,6 +454,15 @@ function evidenceCaveat(score: number, citedClaims: number, hasSources: boolean)
 
 function toScore(value: unknown): number {
   return typeof value === 'number' ? value : Number(value) || 0;
+}
+
+// Databricks DOUBLE columns (distance_km, latitude, longitude) arrive as
+// STRINGS at runtime, so `typeof x === 'number'` is false. Coerce, and return
+// null for anything non-finite so callers can branch cleanly.
+function toFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ---------- review decisions (overrides) ----------
@@ -951,14 +960,14 @@ function Results({
         // 2) Facility-level evidence, then 3) distance, as tiebreakers.
         const diff = toScore(b.evidence_score) - toScore(a.evidence_score);
         if (diff !== 0) return diff;
-        const da = typeof a.distance_km === 'number' ? a.distance_km : Infinity;
-        const db = typeof b.distance_km === 'number' ? b.distance_km : Infinity;
+        const da = toFiniteNumber(a.distance_km) ?? Infinity;
+        const db = toFiniteNumber(b.distance_km) ?? Infinity;
         return da - db;
       });
     } else {
       rows.sort((a, b) => {
-        const da = typeof a.distance_km === 'number' ? a.distance_km : Infinity;
-        const db = typeof b.distance_km === 'number' ? b.distance_km : Infinity;
+        const da = toFiniteNumber(a.distance_km) ?? Infinity;
+        const db = toFiniteNumber(b.distance_km) ?? Infinity;
         if (da !== db) return da - db;
         return toScore(b.evidence_score) - toScore(a.evidence_score);
       });
@@ -975,6 +984,21 @@ function Results({
     const ids = visibleIdsKey ? visibleIdsKey.split(',') : [];
     if (ids.length) void loadSummaries(ids);
   }, [visibleIdsKey, loadSummaries]);
+
+  // Map pin → card: keep a live registry of each card's wrapper element keyed by
+  // facility id, so a click on the map can scroll the matching card into view
+  // and flash it briefly. Refs (not state) — we don't want a re-render per card.
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const handleSelectOnMap = useCallback((uniqueId: string) => {
+    const el = cardRefs.current.get(uniqueId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Brief highlight so the eye lands on the right card after the scroll.
+    el.classList.add('ring-2', 'ring-primary', 'ring-offset-2', 'rounded-lg');
+    window.setTimeout(() => {
+      el.classList.remove('ring-2', 'ring-primary', 'ring-offset-2', 'rounded-lg');
+    }, 1600);
+  }, []);
 
   // Whether any visible row has usable coordinates — drives the two-column
   // (cards + map) layout vs. a single column when the map would be empty.
@@ -1153,15 +1177,23 @@ function Results({
             </p>
           ) : (
             visible.map((row) => (
-              <FacilityCard
+              <div
                 key={row.unique_id}
-                row={row}
-                needle={query.need}
-                saved={shortlist.savedIds.has(row.unique_id)}
-                onSave={shortlist.save}
-                onRemove={shortlist.remove}
-                reviews={reviews}
-              />
+                ref={(el) => {
+                  if (el) cardRefs.current.set(row.unique_id, el);
+                  else cardRefs.current.delete(row.unique_id);
+                }}
+                className="transition-shadow scroll-mt-4"
+              >
+                <FacilityCard
+                  row={row}
+                  needle={query.need}
+                  saved={shortlist.savedIds.has(row.unique_id)}
+                  onSave={shortlist.save}
+                  onRemove={shortlist.remove}
+                  reviews={reviews}
+                />
+              </div>
             ))
           )}
         </div>
@@ -1175,6 +1207,7 @@ function Results({
               heightClass="h-72 lg:h-[34rem]"
               colorMeaning={hasNeed ? 'match for your search (cited / listed / mentioned)' : 'evidence tier'}
               legend={mapLegend}
+              onSelect={handleSelectOnMap}
             />
           </div>
         )}
@@ -1359,11 +1392,15 @@ function FacilityCard({
             <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
               <MapPin className="h-3 w-3" />
               {[row.city, row.state].filter(Boolean).join(', ') || 'Location unknown'}
-              {typeof row.distance_km === 'number' && (
-                <span className="ml-1 inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
-                  ~{row.distance_km} km away
-                </span>
-              )}
+              {(() => {
+                const km = toFiniteNumber(row.distance_km);
+                if (km === null) return null;
+                return (
+                  <span className="ml-1 inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
+                    ~{Math.round(km)} km away
+                  </span>
+                );
+              })()}
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">

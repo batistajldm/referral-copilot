@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Button,
   Card,
@@ -26,8 +26,13 @@ import {
   Globe,
   ListFilter,
   ArrowUpDown,
+  ThumbsUp,
+  ThumbsDown,
+  Users,
+  MessageSquare,
 } from 'lucide-react';
 import { useShortlist, type ShortlistApi, type ShortlistItem, type ShortlistStatus } from './shortlist';
+import { useReviews, type ReviewsApi, type ReviewDetail } from './reviews';
 import { FacilityMap } from './FacilityMap';
 
 // ---------- helpers ----------
@@ -548,6 +553,8 @@ export default function App() {
 
   // Persistent user actions (saved facilities + notes), stored in Lakebase.
   const shortlist = useShortlist();
+  // Shared community reviews (the collaborative feedback loop) — visible to all.
+  const reviews = useReviews();
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -737,6 +744,7 @@ export default function App() {
             <Results
               query={submitted}
               shortlist={shortlist}
+              reviews={reviews}
               specialtyOptions={specialtyOptions ?? []}
               onCorrect={correctNeed}
             />
@@ -874,11 +882,13 @@ type SortMode = 'distance' | 'evidence';
 function Results({
   query,
   shortlist,
+  reviews,
   specialtyOptions,
   onCorrect,
 }: {
   query: Query;
   shortlist: ShortlistApi;
+  reviews: ReviewsApi;
   specialtyOptions: { specialty: string }[];
   onCorrect: (term: string) => void;
 }) {
@@ -936,6 +946,16 @@ function Results({
     }
     return rows;
   }, [data, onlyMatches, hasNeed, sortMode, query.need]);
+
+  // Batch-load community review summaries for the visible facilities, so each
+  // card shows the shared feedback without an N+1 of per-card requests. Keyed on
+  // the concrete id list so it re-runs when the result set changes.
+  const visibleIdsKey = visible.map((r) => r.unique_id).join(',');
+  const { loadSummaries } = reviews;
+  useEffect(() => {
+    const ids = visibleIdsKey ? visibleIdsKey.split(',') : [];
+    if (ids.length) void loadSummaries(ids);
+  }, [visibleIdsKey, loadSummaries]);
 
   // Whether any visible row has usable coordinates — drives the two-column
   // (cards + map) layout vs. a single column when the map would be empty.
@@ -1121,6 +1141,7 @@ function Results({
                 saved={shortlist.savedIds.has(row.unique_id)}
                 onSave={shortlist.save}
                 onRemove={shortlist.remove}
+                reviews={reviews}
               />
             ))
           )}
@@ -1262,12 +1283,14 @@ function FacilityCard({
   saved,
   onSave,
   onRemove,
+  reviews,
 }: {
   row: FacilityRow;
   needle: string;
   saved: boolean;
   onSave: ShortlistApi['save'];
   onRemove: ShortlistApi['remove'];
+  reviews: ReviewsApi;
 }) {
   // Float the matched specialty/claim to the front *before* capping, so the
   // reason this facility matched is never truncated away.
@@ -1478,7 +1501,132 @@ function FacilityCard({
             )}
           </div>
         )}
+
+        {/* 7 · community feedback — the collaborative loop. Shared across users
+            and kept visually distinct from the cited dataset evidence above. */}
+        <CommunityFeedback row={row} reviews={reviews} />
       </CardContent>
     </Card>
+  );
+}
+
+// Shared, cross-user feedback for a facility. This is the "close the loop"
+// surface: a coordinator's thumbs-up/down + note is persisted in Lakebase and
+// shown to everyone who searches this facility next. Deliberately framed as
+// HUMAN feedback, separate from the dataset-derived evidence signals, so it
+// adds collaboration without diluting the "everything is cited" story.
+function CommunityFeedback({ row, reviews }: { row: FacilityRow; reviews: ReviewsApi }) {
+  const summary = reviews.summaries[row.unique_id];
+  const up = summary?.up ?? 0;
+  const down = summary?.down ?? 0;
+  const total = summary?.total ?? 0;
+  const mine = summary?.my_rating ?? null;
+
+  const [comment, setComment] = useState('');
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [details, setDetails] = useState<ReviewDetail[] | null>(null);
+  const [showComments, setShowComments] = useState(false);
+
+  const meta = {
+    facility_id: row.unique_id,
+    facility_name: row.name ?? '',
+    facility_city: clean(row.city) ?? '',
+    facility_state: clean(row.state) ?? '',
+  };
+
+  async function refreshDetails() {
+    setDetails(await reviews.loadDetail(row.unique_id));
+  }
+
+  async function vote(rating: 1 | -1) {
+    // Clicking your current vote again (with no new note) retracts it.
+    if (mine === rating && !comment.trim()) {
+      await reviews.remove(row.unique_id);
+    } else {
+      await reviews.submit({ ...meta, rating, comment: comment.trim() });
+    }
+    setComment('');
+    setNoteOpen(false);
+    if (showComments) await refreshDetails();
+  }
+
+  async function toggleComments() {
+    if (!showComments && details === null) await refreshDetails();
+    setShowComments((v) => !v);
+  }
+
+  const voteBtn = (active: boolean) =>
+    `inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+      active ? 'border-primary/50 bg-primary/10 text-primary' : 'text-muted-foreground hover:border-primary/50 hover:text-primary'
+    }`;
+
+  return (
+    <div className="border-t pt-3 space-y-2">
+      <p className="text-xs font-medium text-foreground flex items-center gap-1.5">
+        <Users className="h-3.5 w-3.5 text-muted-foreground" /> Community feedback
+        <span className="font-normal text-muted-foreground">· from coordinators who used this, not dataset evidence</span>
+      </p>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => void vote(1)} aria-pressed={mine === 1} className={voteBtn(mine === 1)}>
+          <ThumbsUp className="h-3.5 w-3.5" /> Helpful{up > 0 ? ` · ${up}` : ''}
+        </button>
+        <button type="button" onClick={() => void vote(-1)} aria-pressed={mine === -1} className={voteBtn(mine === -1)}>
+          <ThumbsDown className="h-3.5 w-3.5" /> Not helpful{down > 0 ? ` · ${down}` : ''}
+        </button>
+        <button
+          type="button"
+          onClick={() => setNoteOpen((v) => !v)}
+          className="inline-flex items-center gap-1 text-xs text-primary underline underline-offset-2 hover:text-primary/80"
+        >
+          <MessageSquare className="h-3.5 w-3.5" /> {noteOpen ? 'Hide note' : 'Add a note'}
+        </button>
+        {total > 0 && (
+          <button type="button" onClick={() => void toggleComments()} className="text-xs text-muted-foreground hover:text-foreground">
+            {showComments ? 'Hide notes' : `Read notes (${total})`}
+          </button>
+        )}
+      </div>
+
+      {noteOpen && (
+        <div className="space-y-1">
+          <textarea
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            maxLength={2000}
+            rows={2}
+            placeholder="Optional: what should the next coordinator know? (submitted with your Helpful / Not helpful vote)"
+            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
+          />
+          <p className="text-[11px] text-muted-foreground">Pick Helpful or Not helpful above to post your note.</p>
+        </div>
+      )}
+
+      {total === 0 && !noteOpen && (
+        <p className="text-xs text-muted-foreground">No feedback yet — be the first to help the next coordinator.</p>
+      )}
+
+      {showComments && details && (
+        <ul className="space-y-1.5 pt-0.5">
+          {details.length === 0 ? (
+            <li className="text-xs text-muted-foreground">Votes recorded, but no written notes yet.</li>
+          ) : (
+            details.map((d, i) => (
+              <li key={i} className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                {d.rating === 1 ? (
+                  <ThumbsUp className="h-3 w-3 mt-0.5 shrink-0 text-emerald-600" />
+                ) : (
+                  <ThumbsDown className="h-3 w-3 mt-0.5 shrink-0 text-amber-600" />
+                )}
+                <span>
+                  <span className="font-medium text-foreground">{d.is_mine ? 'You' : 'A coordinator'}:</span>{' '}
+                  “{d.comment}”
+                </span>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
   );
 }

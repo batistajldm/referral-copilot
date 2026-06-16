@@ -7,6 +7,13 @@ import {
   updateItem,
   removeFromShortlist,
 } from './shortlist';
+import {
+  initReviewsSchema,
+  summarizeReviews,
+  listReviewsFor,
+  submitReview,
+  deleteReview,
+} from './reviews';
 import { parseQuery, nlParseEnabled } from './parse';
 
 // Lakebase is only configured when the platform injects its connection env
@@ -59,8 +66,9 @@ createApp({
       return;
     }
 
-    // Create the SP-owned schema + table before the server accepts requests.
+    // Create the SP-owned schema + tables before the server accepts requests.
     await initShortlistSchema(appkit);
+    await initReviewsSchema(appkit);
 
     appkit.server.extend((app) => {
       // List the current user's shortlist (saved facilities + notes).
@@ -93,6 +101,38 @@ createApp({
       app.delete('/api/shortlist/:facilityId', async (req, res) => {
         await removeFromShortlist(appkit, userIdFrom(req), req.params.facilityId);
         res.status(204).send();
+      });
+
+      // ── Community reviews (SHARED across users) ──────────────────────────
+      // Aggregated summary for a batch of facilities (the visible results set).
+      // GET /api/reviews?facility_ids=a,b,c
+      app.get('/api/reviews', async (req, res) => {
+        const raw = typeof req.query.facility_ids === 'string' ? req.query.facility_ids : '';
+        const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+        const rows = await summarizeReviews(appkit, userIdFrom(req), ids);
+        res.json(rows);
+      });
+
+      // Individual reviews (anonymised comments) for one facility.
+      app.get('/api/reviews/:facilityId', async (req, res) => {
+        const rows = await listReviewsFor(appkit, userIdFrom(req), req.params.facilityId);
+        res.json(rows);
+      });
+
+      // Submit (or update) the caller's own review.
+      app.post('/api/reviews', async (req, res) => {
+        const result = await submitReview(appkit, userIdFrom(req), req.body);
+        if ('error' in result) {
+          res.status(400).json({ error: result.error });
+          return;
+        }
+        res.status(201).json(result.row);
+      });
+
+      // Remove the caller's own review.
+      app.delete('/api/reviews/:facilityId', async (req, res) => {
+        const summary = await deleteReview(appkit, userIdFrom(req), req.params.facilityId);
+        res.json(summary);
       });
     });
   },

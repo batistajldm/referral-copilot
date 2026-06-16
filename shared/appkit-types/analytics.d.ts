@@ -42,6 +42,10 @@ declare module "@databricks/appkit-ui/react" {
           /** @sqlType STRING */
           capability: string;
           /** @sqlType STRING */
+          procedure_list: string;
+          /** @sqlType STRING */
+          equipment_list: string;
+          /** @sqlType STRING */
           description: string;
           /** @sqlType STRING */
           capacity: string;

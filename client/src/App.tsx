@@ -126,6 +126,61 @@ function clean(value: unknown): string | null {
 // phrase. Tokens shorter than 3 chars and generic stop-words are ignored so we
 // don't paint half the card yellow.
 
+// Levenshtein edit distance — deterministic, no ML. Used only to suggest a
+// closely-spelled specialty when a search returns zero results, so a typo like
+// "dialisis" can point the user at "dialysis". It corrects MISSPELLINGS, not
+// synonyms or abbreviations (those need semantic/vector search — see roadmap).
+function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr = new Array<number>(n + 1);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+/**
+ * Suggest known specialties whose spelling is within a strict edit-distance of
+ * the searched need. Returns up to 3 distinct terms, closest first. Only fires
+ * for genuine typos (dist > 0, threshold scales with word length but capped),
+ * never for exact matches or wildly different words.
+ */
+function suggestSpecialties(
+  need: string,
+  options: { specialty: string }[],
+): string[] {
+  const q = need.trim().toLowerCase();
+  if (q.length < 4 || options.length === 0) return [];
+  // Cap at distance 2 and require the same first letter: typos rarely change
+  // the initial char, and this keeps us from suggesting a semantically
+  // different real specialty (e.g. "cardiology" → "radiology"), which would
+  // undermine the evidence-honest promise.
+  const threshold = Math.min(2, Math.max(1, Math.floor(q.length * 0.34)));
+  const scored = options
+    .map((o) => ({ term: o.specialty, dist: editDistance(q, o.specialty.toLowerCase()) }))
+    .filter((s) => s.dist > 0 && s.dist <= threshold && s.term.toLowerCase()[0] === q[0])
+    .sort((a, b) => a.dist - b.dist);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of scored) {
+    const key = s.term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s.term);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
 const STOP_WORDS = new Set([
   'and', 'the', 'for', 'with', 'care', 'need', 'needs', 'service', 'services',
   'treatment', 'help', 'near', 'have', 'has', 'any', 'all',
@@ -205,7 +260,7 @@ function highlightMatch(text: string, needle: string): ReactNode {
 // This signal answers "how strong is the evidence for THE NEED YOU SEARCHED?" and
 // surfaces the exact source text that matched — so a match is never a black box.
 
-type NeedTrustLevel = 'cited' | 'listed' | 'mentioned' | 'none';
+type NeedTrustLevel = 'cited' | 'listed' | 'offered' | 'mentioned' | 'none';
 
 type NeedTrust = {
   level: NeedTrustLevel;
@@ -242,6 +297,8 @@ function needTrustSignal(
   needle: string,
   capabilityClaims: string[],
   specialties: string[],
+  procedures: string[],
+  equipment: string[],
   description: string | null,
   hasSources: boolean,
 ): NeedTrust | null {
@@ -256,6 +313,27 @@ function needTrustSignal(
   if (specialties.some((s) => matchesNeedle(s, needle))) {
     return { level: 'listed', qualifier: 'listed as a declared specialty', className: 'bg-primary/10 text-primary', snippet: null };
   }
+  // Structured procedure / equipment lists: a concrete service the facility
+  // states it performs or has the kit for. Stronger than a free-text mention
+  // (it's a structured claim), weaker than a declared specialty / cited claim.
+  const procHit = procedures.find((p) => matchesNeedle(p, needle));
+  if (procHit) {
+    return {
+      level: 'offered',
+      qualifier: 'listed as a procedure performed here',
+      className: 'bg-sky-500/15 text-sky-700 dark:text-sky-400',
+      snippet: snippetAround(procHit, tokens),
+    };
+  }
+  const equipHit = equipment.find((e) => matchesNeedle(e, needle));
+  if (equipHit) {
+    return {
+      level: 'offered',
+      qualifier: 'listed in the facility’s equipment',
+      className: 'bg-sky-500/15 text-sky-700 dark:text-sky-400',
+      snippet: snippetAround(equipHit, tokens),
+    };
+  }
   const desc = description ?? '';
   if (matchesNeedle(desc, needle)) {
     return {
@@ -268,6 +346,17 @@ function needTrustSignal(
   return { level: 'none', qualifier: 'no explicit mention found in the listed fields', className: 'bg-muted text-muted-foreground', snippet: null };
 }
 
+// For weak per-need evidence (mentioned / none), spell out WHAT is missing so a
+// care coordinator can see the gap, not just a colour. Turning uncertainty into
+// a concrete checklist is the difference between "looks shaky" and "here's what
+// to confirm before you refer a patient here".
+function missingEvidenceFor(trust: NeedTrust | null, hasSources: boolean): string[] {
+  if (!trust || trust.level === 'cited' || trust.level === 'listed' || trust.level === 'offered') return [];
+  const gaps = ['no cited capability claim for this need', 'not a declared specialty'];
+  if (!hasSources) gaps.push('no source link');
+  return gaps;
+}
+
 // How relevant is this facility to the SEARCHED need? Higher = better match.
 // This is the primary ranking key when a need is given, so a facility that is
 // well-documented overall but a poor fit for the search doesn't outrank a
@@ -275,8 +364,10 @@ function needTrustSignal(
 function needRelevanceScore(trust: NeedTrust | null): number {
   switch (trust?.level) {
     case 'cited':
-      return 4;
+      return 5;
     case 'listed':
+      return 4;
+    case 'offered':
       return 3;
     case 'mentioned':
       return 2;
@@ -294,6 +385,8 @@ function needPinColor(trust: NeedTrust | null): string {
       return '#16a34a'; // green  - cited capability
     case 'listed':
       return '#2563eb'; // blue   - listed specialty
+    case 'offered':
+      return '#0891b2'; // cyan   - listed procedure / equipment
     case 'mentioned':
       return '#d97706'; // amber  - only free-text mention
     default:
@@ -309,6 +402,8 @@ function needRelevanceLabel(trust: NeedTrust | null): string {
       return 'Cited capability for your search';
     case 'listed':
       return 'Listed as a specialty';
+    case 'offered':
+      return 'Listed procedure / equipment';
     case 'mentioned':
       return 'Only mentioned in description';
     default:
@@ -467,6 +562,15 @@ export default function App() {
     setNlText('');
     setNlError(null);
     setSubmitted(q);
+  }
+
+  // Apply a "did you mean" specialty correction: update the form field and
+  // re-run the search with the corrected need (city/state unchanged).
+  function correctNeed(corrected: string) {
+    setNeed(corrected);
+    setSubmitted((prev) =>
+      prev ? { ...prev, need: corrected } : { state, city, need: corrected },
+    );
   }
 
   return (
@@ -630,7 +734,12 @@ export default function App() {
 
           {/* results */}
           {submitted ? (
-            <Results query={submitted} shortlist={shortlist} />
+            <Results
+              query={submitted}
+              shortlist={shortlist}
+              specialtyOptions={specialtyOptions ?? []}
+              onCorrect={correctNeed}
+            />
           ) : (
             <p className="text-sm text-muted-foreground text-center py-12">
               Enter a care need and location above — or tap an example to start.
@@ -762,7 +871,17 @@ function ShortlistRow({ item, shortlist }: { item: ShortlistItem; shortlist: Sho
 
 type SortMode = 'distance' | 'evidence';
 
-function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }) {
+function Results({
+  query,
+  shortlist,
+  specialtyOptions,
+  onCorrect,
+}: {
+  query: Query;
+  shortlist: ShortlistApi;
+  specialtyOptions: { specialty: string }[];
+  onCorrect: (term: string) => void;
+}) {
   const params = useMemo(
     () => ({
       state: sql.string(query.state),
@@ -787,7 +906,7 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
     if (onlyMatches && hasNeed) {
       rows = rows.filter((r) => {
         const t = computeRowTrust(r, query.need);
-        return t?.level === 'cited' || t?.level === 'listed';
+        return t?.level === 'cited' || t?.level === 'listed' || t?.level === 'offered';
       });
     }
     if (sortMode === 'evidence') {
@@ -852,6 +971,7 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
         ? [
             { color: '#16a34a', label: 'Cited' },
             { color: '#2563eb', label: 'Listed' },
+            { color: '#0891b2', label: 'Procedure/equipment' },
             { color: '#d97706', label: 'Mentioned' },
             { color: '#6b7280', label: 'No match' },
           ]
@@ -875,7 +995,37 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
   }
   if (error) return <div className="text-destructive text-sm">Error: {error}</div>;
   if (!data || data.length === 0) {
-    return <p className="text-sm text-muted-foreground text-center py-12">No facilities matched your search.</p>;
+    const suggestions = hasNeed ? suggestSpecialties(query.need, specialtyOptions) : [];
+    return (
+      <div className="text-center py-12 space-y-3">
+        <p className="text-sm text-muted-foreground">
+          No facilities matched your search
+          {hasNeed ? (
+            <>
+              {' '}for &ldquo;<span className="font-medium text-foreground">{query.need}</span>&rdquo;
+            </>
+          ) : null}
+          .
+        </p>
+        {suggestions.length > 0 ? (
+          <div className="flex flex-col items-center gap-2">
+            <p className="text-sm text-muted-foreground">Did you mean:</p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {suggestions.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => onCorrect(s)}
+                  className="rounded-full border border-input bg-background px-3 py-1 text-sm font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                >
+                  {humanize(s)}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -1045,15 +1195,16 @@ function ConfidenceExplainer() {
           <strong className="text-foreground">Two separate signals.</strong> The{' '}
           <strong className="text-foreground">Facility</strong> score above answers “how well-documented is this place
           overall?”. The <strong className="text-foreground">Your search for “…”</strong> note on each result answers a
-          different question: “is the specific service you searched for actually evidenced here — cited, just listed, or
-          only mentioned in free text?”. A facility can be well-documented overall (Strong · 12) while your exact search
+          different question: “is the specific service you searched for actually evidenced here — cited, listed as a
+          specialty, listed as a procedure/equipment, or only mentioned in free text?”. A facility can be well-documented
+          overall (Strong · 12) while your exact search
           term is only weakly evidenced — both can be true at once, and we show both.
         </p>
         <div className="border-t pt-2 space-y-2">
           <p>
             <strong className="text-foreground">Ranking &amp; map colour (when you search a service).</strong> Results are
             ordered by <em>relevance to that service first</em>, then facility evidence, then distance — so a place that
-            actually offers (and cites) what you searched outranks one that’s merely well-documented. The four relevance
+            actually offers (and cites) what you searched outranks one that’s merely well-documented. The five relevance
             tiers (highest → lowest) are:
           </p>
           <ul className="space-y-1">
@@ -1065,6 +1216,11 @@ function ConfidenceExplainer() {
             <li className="flex items-center gap-2">
               <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#2563eb' }} />
               <span className="text-foreground">Listed</span> — appears as a declared specialty.
+            </li>
+            <li className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#0891b2' }} />
+              <span className="text-foreground">Procedure/equipment</span> — listed in the facility’s structured
+              procedures or equipment (a concrete service, stronger than a free-text mention).
             </li>
             <li className="flex items-center gap-2">
               <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#d97706' }} />
@@ -1094,8 +1250,10 @@ type FacilityRow = QueryRegistry['facility_search']['result'][number];
 function computeRowTrust(row: FacilityRow, needle: string): NeedTrust | null {
   const allSpecialties = unique(parseJsonArray(row.specialties).map(humanize));
   const allCapability = parseJsonArray(row.capability);
+  const allProcedures = parseJsonArray(row.procedure_list);
+  const allEquipment = parseJsonArray(row.equipment_list);
   const hasSources = unique(parseJsonArray(row.source_urls).filter(isHttpUrl)).length > 0;
-  return needTrustSignal(needle, allCapability, allSpecialties, row.description, hasSources);
+  return needTrustSignal(needle, allCapability, allSpecialties, allProcedures, allEquipment, row.description, hasSources);
 }
 
 function FacilityCard({
@@ -1115,6 +1273,8 @@ function FacilityCard({
   // reason this facility matched is never truncated away.
   const allSpecialties = unique(parseJsonArray(row.specialties).map(humanize));
   const allCapability = parseJsonArray(row.capability);
+  const allProcedures = parseJsonArray(row.procedure_list);
+  const allEquipment = parseJsonArray(row.equipment_list);
   const specialties = matchesFirst(allSpecialties, needle).slice(0, 8);
   const evidence = matchesFirst(allCapability, needle).slice(0, 4);
   const sources = unique(parseJsonArray(row.source_urls).filter(isHttpUrl)).slice(0, 5);
@@ -1130,7 +1290,8 @@ function FacilityCard({
 
   // How strongly is the SEARCHED need evidenced here? (checks full, untruncated
   // lists + description, so the "why did this match?" is always answerable.)
-  const trust = needTrustSignal(needle, allCapability, allSpecialties, row.description, sources.length > 0);
+  const trust = needTrustSignal(needle, allCapability, allSpecialties, allProcedures, allEquipment, row.description, sources.length > 0);
+  const missing = missingEvidenceFor(trust, sources.length > 0);
 
   function toggleSave() {
     if (saved) {
@@ -1196,7 +1357,7 @@ function FacilityCard({
         {/* 1 · per-need trust signal — the answer to "should I look here?" */}
         {trust && (
           <div className={`flex items-start gap-2 rounded-md px-3 py-2.5 text-sm ${trust.className}`}>
-            {trust.level === 'cited' || trust.level === 'listed' ? (
+            {trust.level === 'cited' || trust.level === 'listed' || trust.level === 'offered' ? (
               <ShieldCheck className="h-4 w-4 mt-0.5 shrink-0" />
             ) : (
               <ShieldAlert className="h-4 w-4 mt-0.5 shrink-0" />
@@ -1210,6 +1371,15 @@ function FacilityCard({
                 <p className="mt-1 text-xs leading-snug text-foreground/80">
                   “{highlightMatch(trust.snippet, needle)}”
                 </p>
+              )}
+              {missing.length > 0 && (
+                <div className="mt-1.5 text-xs">
+                  <span className="opacity-70">Missing: </span>
+                  <span>{missing.join(' · ')}.</span>
+                  <span className="mt-1 flex items-center gap-1 font-medium">
+                    <AlertTriangle className="h-3 w-3 shrink-0" /> Verify before referring.
+                  </span>
+                </div>
               )}
             </div>
           </div>

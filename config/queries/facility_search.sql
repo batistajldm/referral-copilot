@@ -6,7 +6,8 @@
 -- Parameters:
 --   :state     optional exact state/region hard filter ('' = any)
 --   :need      optional free-text need/specialty; matched against specialties,
---              capability claims and description ('' = any)
+--              capability claims, procedures performed, equipment, and the
+--              free-text description ('' = any)
 --   :city      optional place to be "near"; derives a reference point used to
 --              rank by distance ('' = rank by evidence only, no proximity)
 -- @param state STRING
@@ -20,6 +21,12 @@ WITH base AS (
     address_stateOrRegion                          AS state,
     specialties,
     capability,
+    -- structured clinical-evidence fields: procedures performed and equipment
+    -- available. Same JSON-array shape as `capability`; we expose and search them
+    -- so a need evidenced ONLY here (not in specialties/capability/description)
+    -- is no longer missed (e.g. dialysis listed as a procedure).
+    `procedure`                                    AS procedure_list,
+    equipment                                      AS equipment_list,
     description,
     capacity,
     numberDoctors,
@@ -58,6 +65,8 @@ SELECT
   b.state,
   b.specialties,
   b.capability,
+  b.procedure_list,
+  b.equipment_list,
   b.description,
   b.capacity,
   b.numberDoctors,
@@ -92,9 +101,11 @@ CROSS JOIN ref r
 WHERE (:state = '' OR LOWER(b.state) = LOWER(:state))
   AND (
         :need = ''
-        OR LOWER(b.specialties) LIKE LOWER(CONCAT('%', :need, '%'))
-        OR LOWER(b.capability)  LIKE LOWER(CONCAT('%', :need, '%'))
-        OR LOWER(b.description) LIKE LOWER(CONCAT('%', :need, '%'))
+        OR LOWER(b.specialties)    LIKE LOWER(CONCAT('%', :need, '%'))
+        OR LOWER(b.capability)     LIKE LOWER(CONCAT('%', :need, '%'))
+        OR LOWER(b.procedure_list) LIKE LOWER(CONCAT('%', :need, '%'))
+        OR LOWER(b.equipment_list) LIKE LOWER(CONCAT('%', :need, '%'))
+        OR LOWER(b.description)    LIKE LOWER(CONCAT('%', :need, '%'))
       )
 ORDER BY
   -- when a reference point exists, nearest first; otherwise evidence-first

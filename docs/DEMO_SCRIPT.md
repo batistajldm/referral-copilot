@@ -51,7 +51,7 @@ Dataset: `databricks_virtue_foundation_dataset_dais_2026.virtue_foundation_datas
 
 ## 2:20 — Persistence proof (15s) [TE]
 - Reload the page → shortlist + note + status survive.
-> "That's Lakebase Postgres behind the app — sub-10ms reads, the service principal owns the schema."
+> "That's Lakebase Postgres behind the app — a low-latency transactional store, and the service principal owns the schema."
 
 ## 2:35 — Ambition / what's next (15s) [AM]
 > "What's next: a live map with road-distance routing, capacity-aware ranking, and a referral hand-off that emails the facility. The evidence spine — cited claims, never fabricated — stays the same."

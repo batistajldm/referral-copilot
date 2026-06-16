@@ -107,6 +107,15 @@ User query ──▶ /api/parse-query ──▶ Model Serving (Llama 3.3 70B)   
   parameterized — no string interpolation, no AI-generated facts.
 - The **service principal** owns the Lakebase schema; user actions are scoped per user.
 
+### Architecture & scalability
+
+See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the code-grounded details. In short:
+facility data is **queried directly in the Lakehouse** via a serverless **SQL Warehouse over Unity
+Catalog** (no data copy, scales with the dataset); **SQL Warehouse + Model Serving are serverless**
+and auto-suspend, so cost tracks usage roughly linearly; **Lakebase Postgres** holds only per-user
+state (shortlist/notes/status). New features are additive — drop a SQL file in `config/queries/` or
+an Express route in `server/server.ts`, no base rewrite.
+
 ## Tech stack
 
 - **App framework:** [AppKit](https://www.databricks.com/devhub/docs/appkit/v0/) (React + TypeScript + Express)

@@ -28,6 +28,7 @@ import {
   ArrowUpDown,
 } from 'lucide-react';
 import { useShortlist, type ShortlistApi, type ShortlistItem, type ShortlistStatus } from './shortlist';
+import { FacilityMap } from './FacilityMap';
 
 // ---------- helpers ----------
 
@@ -265,6 +266,54 @@ function needTrustSignal(
     };
   }
   return { level: 'none', qualifier: 'no explicit mention found in the listed fields', className: 'bg-muted text-muted-foreground', snippet: null };
+}
+
+// How relevant is this facility to the SEARCHED need? Higher = better match.
+// This is the primary ranking key when a need is given, so a facility that is
+// well-documented overall but a poor fit for the search doesn't outrank a
+// facility that actually offers (and cites) the searched service.
+function needRelevanceScore(trust: NeedTrust | null): number {
+  switch (trust?.level) {
+    case 'cited':
+      return 4;
+    case 'listed':
+      return 3;
+    case 'mentioned':
+      return 2;
+    default:
+      return 1; // 'none' or no need searched
+  }
+}
+
+// Pin colour driven by per-need relevance (mirrors the card's trust badge),
+// so the map answers "how good a match for my search?" rather than "how
+// documented overall?".
+function needPinColor(trust: NeedTrust | null): string {
+  switch (trust?.level) {
+    case 'cited':
+      return '#16a34a'; // green  - cited capability
+    case 'listed':
+      return '#2563eb'; // blue   - listed specialty
+    case 'mentioned':
+      return '#d97706'; // amber  - only free-text mention
+    default:
+      return '#6b7280'; // gray   - no explicit match
+  }
+}
+
+// Short human label for a per-need relevance level (shown in the map popup so
+// the pin colour is self-explanatory).
+function needRelevanceLabel(trust: NeedTrust | null): string {
+  switch (trust?.level) {
+    case 'cited':
+      return 'Cited capability for your search';
+    case 'listed':
+      return 'Listed as a specialty';
+    case 'mentioned':
+      return 'Only mentioned in description';
+    default:
+      return 'No explicit match for your search';
+  }
 }
 
 // ---------- evidence & uncertainty ----------
@@ -743,6 +792,15 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
     }
     if (sortMode === 'evidence') {
       rows.sort((a, b) => {
+        // 1) When a need is searched, per-need relevance leads: a facility that
+        //    actually offers (and cites) the searched service ranks above one
+        //    that's merely well-documented overall.
+        if (hasNeed) {
+          const rel =
+            needRelevanceScore(computeRowTrust(b, query.need)) - needRelevanceScore(computeRowTrust(a, query.need));
+          if (rel !== 0) return rel;
+        }
+        // 2) Facility-level evidence, then 3) distance, as tiebreakers.
         const diff = toScore(b.evidence_score) - toScore(a.evidence_score);
         if (diff !== 0) return diff;
         const da = typeof a.distance_km === 'number' ? a.distance_km : Infinity;
@@ -759,6 +817,52 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
     }
     return rows;
   }, [data, onlyMatches, hasNeed, sortMode, query.need]);
+
+  // Whether any visible row has usable coordinates — drives the two-column
+  // (cards + map) layout vs. a single column when the map would be empty.
+  const hasMapPoints = useMemo(
+    () =>
+      visible.some((r) => {
+        const lat = Number(r.latitude);
+        const lon = Number(r.longitude);
+        return Number.isFinite(lat) && Number.isFinite(lon) && !(lat === 0 && lon === 0);
+      }),
+    [visible],
+  );
+
+  // Enrich map points with a per-need relevance colour when a need is searched,
+  // so the pin colour answers "how good a match for my search?". With no need,
+  // fall through to the map's evidence-tier colouring.
+  const mapPoints = useMemo(
+    () =>
+      hasNeed
+        ? visible.map((r) => {
+            const t = computeRowTrust(r, query.need);
+            return { ...r, pinColor: needPinColor(t), relevanceLabel: needRelevanceLabel(t) };
+          })
+        : visible,
+    [visible, hasNeed, query.need],
+  );
+
+  // Colour legend for the map — per-need relevance tiers when a service was
+  // searched, otherwise facility-evidence tiers.
+  const mapLegend = useMemo(
+    () =>
+      hasNeed
+        ? [
+            { color: '#16a34a', label: 'Cited' },
+            { color: '#2563eb', label: 'Listed' },
+            { color: '#d97706', label: 'Mentioned' },
+            { color: '#6b7280', label: 'No match' },
+          ]
+        : [
+            { color: '#16a34a', label: 'Strong' },
+            { color: '#2563eb', label: 'Moderate' },
+            { color: '#d97706', label: 'Limited' },
+            { color: '#6b7280', label: 'Insufficient' },
+          ],
+    [hasNeed],
+  );
 
   if (loading) {
     return (
@@ -783,7 +887,9 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
           {visible.length !== data.length ? <span> of {data.length}</span> : null} facilities ·{' '}
           {sortMode === 'distance' && hasCity
             ? `nearest to ${query.city.trim()} first`
-            : 'strongest evidence first'}
+            : hasNeed
+              ? 'best match for your search first'
+              : 'strongest evidence first'}
         </p>
         <div className="flex flex-wrap items-center gap-1.5">
           {hasNeed && (
@@ -819,11 +925,16 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
               type="button"
               aria-pressed={sortMode === 'evidence'}
               onClick={() => setSortMode('evidence')}
+              title={
+                hasNeed
+                  ? 'Sort by relevance to your search (cited > listed > mentioned), then facility evidence'
+                  : 'Sort by facility evidence'
+              }
               className={`rounded-full px-2 py-0.5 transition-colors ${
                 sortMode === 'evidence' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              Evidence
+              {hasNeed ? 'Relevance' : 'Evidence'}
             </button>
           </div>
         </div>
@@ -835,25 +946,49 @@ function Results({ query, shortlist }: { query: Query; shortlist: ShortlistApi }
 
       <ConfidenceExplainer />
 
-      {visible.length === 0 ? (
-        <p className="text-sm text-muted-foreground text-center py-8">
-          No facilities have a cited or listed match for “{query.need.trim()}”.{' '}
-          <button type="button" onClick={() => setOnlyMatches(false)} className="text-primary underline underline-offset-2">
-            Show all results
-          </button>
-        </p>
-      ) : (
-        visible.map((row) => (
-          <FacilityCard
-            key={row.unique_id}
-            row={row}
-            needle={query.need}
-            saved={shortlist.savedIds.has(row.unique_id)}
-            onSave={shortlist.save}
-            onRemove={shortlist.remove}
-          />
-        ))
-      )}
+      <div
+        className={
+          hasMapPoints
+            ? 'grid gap-4 lg:grid-cols-[1fr_22rem] lg:items-start'
+            : 'space-y-3'
+        }
+      >
+        {/* results list (left on desktop) */}
+        <div className="space-y-3 min-w-0 order-2 lg:order-1">
+          {visible.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-8">
+              No facilities have a cited or listed match for “{query.need.trim()}”.{' '}
+              <button type="button" onClick={() => setOnlyMatches(false)} className="text-primary underline underline-offset-2">
+                Show all results
+              </button>
+            </p>
+          ) : (
+            visible.map((row) => (
+              <FacilityCard
+                key={row.unique_id}
+                row={row}
+                needle={query.need}
+                saved={shortlist.savedIds.has(row.unique_id)}
+                onSave={shortlist.save}
+                onRemove={shortlist.remove}
+              />
+            ))
+          )}
+        </div>
+
+        {/* map (right on desktop, sticky so it stays in view while scrolling cards) */}
+        {hasMapPoints && (
+          <div className="order-1 lg:order-2 lg:sticky lg:top-4">
+            <FacilityMap
+              points={mapPoints}
+              city={query.city}
+              heightClass="h-72 lg:h-[34rem]"
+              colorMeaning={hasNeed ? 'match for your search (cited / listed / mentioned)' : 'evidence tier'}
+              legend={mapLegend}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -914,6 +1049,38 @@ function ConfidenceExplainer() {
           only mentioned in free text?”. A facility can be well-documented overall (Strong · 12) while your exact search
           term is only weakly evidenced — both can be true at once, and we show both.
         </p>
+        <div className="border-t pt-2 space-y-2">
+          <p>
+            <strong className="text-foreground">Ranking &amp; map colour (when you search a service).</strong> Results are
+            ordered by <em>relevance to that service first</em>, then facility evidence, then distance — so a place that
+            actually offers (and cites) what you searched outranks one that’s merely well-documented. The four relevance
+            tiers (highest → lowest) are:
+          </p>
+          <ul className="space-y-1">
+            <li className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#16a34a' }} />
+              <span className="text-foreground">Cited</span> — the searched service is a cited capability claim
+              (traceable to a source).
+            </li>
+            <li className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#2563eb' }} />
+              <span className="text-foreground">Listed</span> — appears as a declared specialty.
+            </li>
+            <li className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#d97706' }} />
+              <span className="text-foreground">Mentioned</span> — only found in the free-text description (weaker).
+            </li>
+            <li className="flex items-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#6b7280' }} />
+              <span className="text-foreground">No match</span> — no explicit mention in the listed fields.
+            </li>
+          </ul>
+          <p>
+            The <strong className="text-foreground">map pin colour uses these same tiers</strong>, and each pin’s popup
+            states the reason for its colour. When you search by location only (no service), ranking and pin colour fall
+            back to the facility evidence tier (Strong / Moderate / Limited / Insufficient).
+          </p>
+        </div>
       </div>
     </details>
   );

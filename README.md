@@ -34,23 +34,13 @@ uncertainty, and lets a care coordinator save, annotate, and triage candidates.
 
 ## Testing instructions (for judges)
 
-> The live app is a **Databricks App** and is **auth-gated by design** — Databricks Apps cannot be
-> made public or bypass SSO. To evaluate the running app, use the access below.
-
-> ### 🔑 ACCESS FOR JUDGES — _team to fill in before submission_
+> The live app is a **Databricks App** and is **auth-gated by design** — Databricks Apps run behind
+> workspace SSO and cannot be made public.
 >
-> ```
-> Live app URL: https://referral-copilot-2878696955147552.aws.databricksapps.com
+> **Evaluation is done live during the 3-minute demo with the judges** (per judges' instruction,
+> 16 Jun 2026), so no standalone login is required for review.
 >
-> >>> PASTE JUDGE ACCESS HERE <<<
->   Option A — test login:   email: __________   password: __________
->   Option B — access method: __________________________________________
->
-> Video walkthrough (no login required): >>> PASTE VIDEO LINK HERE <<<
-> ```
->
-> *(No real credentials are committed to this repo. The team provides judge access via a dedicated,
-> least-privilege account or a video walkthrough.)*
+> Live app URL (auth-gated): https://referral-copilot-2878696955147552.aws.databricksapps.com
 
 ### Try these example queries
 
